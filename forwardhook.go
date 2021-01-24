@@ -9,7 +9,11 @@ import (
 	"os"
 	"strings"
 	"time"
+	"encoding/json"
+	"github.com/Jeffail/gabs"
 )
+
+const row_sep string = ";;;"
 
 // maxRetries indicates the maximum amount of retries we will perform before
 // giving up
@@ -25,7 +29,8 @@ func mirrorRequest(h http.Header, body []byte, url string) {
 
 		client := &http.Client{}
 
-		rB := bytes.NewReader(body)
+		// rB := bytes.NewReader(body)
+		rB := bytes.NewBuffer(body)
 		req, err := http.NewRequest("POST", url, rB)
 		if err != nil {
 			log.Println("[error] http.NewRequest:", err)
@@ -33,6 +38,8 @@ func mirrorRequest(h http.Header, body []byte, url string) {
 
 		// Set headers from request
 		req.Header = h
+
+		req.Header.Set("Content-Type", "application/json")
 
 		resp, err := client.Do(req)
 		if err != nil {
@@ -79,8 +86,43 @@ func handleHook(sites []string) http.Handler {
 		}
 		r.Body.Close()
 
+		jsonParsed, err := gabs.ParseJSON(rB)
+		if err != nil {
+			log.Printf("Fail on gabs ParseJSON")
+		}
+		// Process data start
+		items, ok := jsonParsed.Search("items").Data().([]interface{})
+		if ok != true {
+			log.Printf("Fail on gabs Search")
+		}
+		
+		var titles, bodys, tags []string
+		for _, item := range items {
+			titles = append(titles, item.(map[string]interface {})["title"].(string))
+			bodys = append(bodys, item.(map[string]interface {})["summary"].(map[string]interface {})["content"].(string))
+			tags_str := item.(map[string]interface {})["categories"].([]interface {})
+			var sub_tags []string
+			for _, tag := range tags_str {
+				tag_strs := strings.Split(tag.(string), "/")
+				if tag_strs[len(tag_strs)-2] == "label" {
+					sub_tags = append(sub_tags, tag_strs[len(tag_strs)-1])
+				}
+			}
+			tags = append(tags, strings.Join(sub_tags, ","))
+		}
+		var data = map[string]interface {} {
+			"value1":strings.Join(titles, row_sep),
+			"value2":strings.Join(bodys, row_sep),
+			"value3":strings.Join(tags, row_sep),
+		}
+		// Process data end
+		new_rB, err := json.Marshal(data)
+		if err != nil {
+			log.Printf("Fail on Marshal")
+		}
+
 		for _, url := range sites {
-			go mirrorRequest(r.Header, rB, url)
+			go mirrorRequest(r.Header, new_rB, url)
 		}
 
 		w.WriteHeader(http.StatusOK)
