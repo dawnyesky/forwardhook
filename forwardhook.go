@@ -1,19 +1,21 @@
 package main
 
 import (
-	"bytes"
-	"fmt"
-	"io/ioutil"
-	"log"
-	"net/http"
 	"os"
-	"strings"
+	"log"
+	"fmt"
 	"time"
+	"html"
+	"bytes"
+	"strings"
+	"io/ioutil"
+	"net/http"
 	"encoding/json"
 	"github.com/Jeffail/gabs"
 )
 
 const row_sep string = ";;;"
+const MERCURY_PARSER_API_URL string = "https://h5cxtopl66.execute-api.us-east-1.amazonaws.com/prod/parser?url=%s"
 
 // maxRetries indicates the maximum amount of retries we will perform before
 // giving up
@@ -73,7 +75,7 @@ func parseSites() []string {
 	return s
 }
 
-func handleHook(sites []string) http.Handler {
+func handleHook(sites []string, fulltext bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			w.WriteHeader(http.StatusBadRequest)
@@ -98,9 +100,24 @@ func handleHook(sites []string) http.Handler {
 		
 		var titles, bodys, tags []string
 		for _, item := range items {
-			titles = append(titles, item.(map[string]interface {})["title"].(string))
-			bodys = append(bodys, item.(map[string]interface {})["summary"].(map[string]interface {})["content"].(string))
-			tags_str := item.(map[string]interface {})["categories"].([]interface {})
+			item := item.(map[string]interface {})
+			titles = append(titles, item["title"].(string))
+			if fulltext == true {
+				link := item["canonical"].([]interface {})[0].(map[string]interface {})["href"].(string)
+				resp, err := http.Get(fmt.Sprintf(MERCURY_PARSER_API_URL, link))
+				if err != nil {
+					log.Printf("Fail on http Get")
+				}
+				body, err := ioutil.ReadAll(resp.Body)
+				resp.Body.Close()
+				var res map[string]interface {}
+				json.Unmarshal(body, &res)
+				content, _ := res["content"].(string)
+				bodys = append(bodys, html.UnescapeString(content))
+			} else {
+				bodys = append(bodys, item["summary"].(map[string]interface {})["content"].(string))
+			}
+			tags_str := item["categories"].([]interface {})
 			var sub_tags []string
 			for _, tag := range tags_str {
 				tag_strs := strings.Split(tag.(string), "/")
@@ -137,7 +154,12 @@ func main() {
 	sites := parseSites()
 	fmt.Println("Will forward hooks to:", sites)
 
-	http.Handle("/", handleHook(sites))
+	fulltext := os.Getenv("FULLTEXT")
+	if strings.ToLower(fulltext) == "true" {
+		http.Handle("/", handleHook(sites, true))
+	} else {
+		http.Handle("/", handleHook(sites, false))
+	}
 	http.HandleFunc("/health-check", handleHealthCheck)
 
 	fmt.Printf("Listening on port 8000\n")
